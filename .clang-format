@@ -1,0 +1,22 @@
+# Use Google style as the base
+BasedOnStyle: Google
+
+# Customize the settings
+IndentWidth: 4               # Set indentation to 4 spaces
+TabWidth: 2                  # Width of a tab character (default for Google is 8)
+UseTab: Never                # Use spaces instead of tabs
+BreakBeforeBraces: Attach    # Keep opening braces on the same line
+ColumnLimit: 140             # Set a wider line width (default for Google is 80)
+
+# Additional Google style settings
+AllowShortFunctionsOnASingleLine: Inline # Allow short functions on a single line if possible
+ConstructorInitializerAllOnOneLineOrOnePerLine: true # Constructor initializers either all on one line or one per line
+DerivePointerAlignment: false            # Do not infer pointer alignment from code
+PointerAlignment: Left                   # Align pointer symbols to the left of the type
+NamespaceIndentation: None               # No indentation for namespace contents
+SortIncludes: false                      # Do not sort includes by default
+AccessModifierOffset: -1                 # Indent access modifiers by -1 space
+IndentCaseLabels: true                   # Indent case labels in a switch statement
+BreakBeforeBinaryOperators: None         # Place binary operators at the end of the line
+AllowShortIfStatementsOnASingleLine: true # Allow short if statements on a single line
+SpaceAfterTemplateKeyword: true          # Add a space after the `template` keyword

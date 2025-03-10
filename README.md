@@ -1,81 +1,98 @@
-# High-Performance OrderBook Implementation
+# Event Processor
 
-A high-performance order book implementation with optimized data structures and multi-connection WebSocket support for cryptocurrency market data processing.
+A high-performance, lock-free event processing system implemented in C++20. The system provides efficient event handling through a lock-free ring buffer implementation, making it suitable for concurrent producer-consumer scenarios.
 
-## Key Features
+## Features
 
-### Features in Detail:
-- Real-time order book processing from Gemini exchange
-- Full market depth support (100 levels per side)
-- Handles trades, cancellations, and new orders
-- Automatic price level organization
-- Thread-safe message processing
-- Memory efficient design for high-frequency updates
+- Lock-free ring buffer implementation
+- Zero-copy event processing
+- Thread-safe event handling
+- Configurable buffer size (default: 4096 events)
+- Memory-efficient event allocation
+- Support for multiple producers and single consumer
+- RAII-based resource management
 
-### OrderBook Optimizations
-- **Bucketed Array Structure**
-  - Uses `std::deque<std::list<Order>>` for stable iterators and efficient insertions
-  - Price levels grouped into buckets based on price steps (15.00$ increments)
-  - O(1) best price lookup
-  - O(log k) order placement within bucket, where k is CACHE_DEPTH
-  - Memory efficient storage for large number of price levels
+## Components
 
-- **Price Level Management**
-  - Internal uint32_t price representation (2 decimal precision)
-  - Efficient bucket shifts for new best prices
-  - Automatic bucket cleanup and rebalancing
-  - Hash map for O(1) price level lookups
+### Ring Buffer (`src/ring_buffer.h`)
 
-### WebSocket Connection Management
-- **Multi-Connection Support**
-  - Configurable number of parallel WebSocket connections
-  - Load balancing across connections
-  - Automatic failover on connection loss
-  - Connection-specific sequence tracking
+The core component implementing a lock-free circular buffer with the following features:
+- Thread-safe operations using atomic operations
+- Contiguous space reservation for batch operations
+- Efficient memory reuse
+- Sequence locking for concurrent access
+- Memory ordering guarantees
 
-- **Message Deduplication**
-  - Ring buffer implementation for memory efficiency
-  - O(1) duplicate detection using hash set
-  - Periodic memory cleanup with message preservation
-  - Connection-aware message sequencing
+### Event Processor (`src/event_proc.h`)
 
-### Performance Features
-- **Lock-Free Message Queue**
-  - MPSC (Multi-Producer Single-Consumer) queue
-  - Zero-copy message passing
-  - Cache-friendly data structures
-  - Minimal contention between producers
+Manages event lifecycle and processing:
+- Event reservation and commitment
+- Batch event processing
+- Automatic resource cleanup
+- Event type safety
+- Error handling and reporting
 
-- **Memory Management**
-  - Fixed-size bucket arrays
-  - Efficient memory reuse
-  - Automatic cleanup of stale data
-  - Optimized for high-frequency updates
-
-### Dependencies:
-- Boost libraries
-- simdjson library
-
-## Build and Installation
+## Building
 
 ### Prerequisites
+
+- CMake 3.10 or higher
 - C++20 compatible compiler
-- Boost libraries
-- simdjson library
+- pthread library
 
-### Installation
-unzip Baltser_Anton_Gemini_OrderBook.zip
-cd Baltser_Anton_Gemini_OrderBook
-make directories
-make -j 8 libraries
-make -j 8
+### Build Instructions
 
-# Recommended: 2-4 connections for optimal performance
+```bash
+# Create build directory
+mkdir build && cd build
 
-### Run:
+# Configure CMake
+cmake ..
 
-./build/main
-type number of connections for WS
+# Build
+cmake --build .
+```
+
+### Build Types
+
+- Debug (default): Includes debug symbols, sanitizers, and additional checks
+```bash
+cmake -DCMAKE_BUILD_TYPE=Debug ..
+```
+
+- Release: Optimized build for production use
+```bash
+cmake -DCMAKE_BUILD_TYPE=Release ..
+```
 
 
+## Performance Considerations
 
+- The ring buffer is optimized for high-throughput scenarios
+- Uses atomic operations to avoid locks
+- Minimizes false sharing through proper memory alignment
+- Provides batch operations for improved efficiency
+- Supports zero-copy event processing
+
+## Memory Management
+
+The system uses a combination of strategies for efficient memory management:
+- RAII for automatic resource cleanup
+- Smart pointers for ownership management
+- Explicit memory management for performance-critical paths
+- Automatic cleanup of uncommitted events
+
+## Thread Safety
+
+The implementation ensures thread safety through:
+- Atomic operations
+- Memory barriers
+- Sequence locking for complex operations
+- Lock-free algorithms
+
+## Limitations
+
+- Single consumer design
+- Fixed buffer size after initialization
+- Events must be pointer-sized
+- No support for priority queues

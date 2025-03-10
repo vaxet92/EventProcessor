@@ -6,7 +6,7 @@ IndentWidth: 4               # Set indentation to 4 spaces
 TabWidth: 2                  # Width of a tab character (default for Google is 8)
 UseTab: Never                # Use spaces instead of tabs
 BreakBeforeBraces: Attach    # Keep opening braces on the same line
-ColumnLimit: 140             # Set a wider line width (default for Google is 80)
+ColumnLimit: 120             # Set a wider line width (default for Google is 80)
 
 # Additional Google style settings
 AllowShortFunctionsOnASingleLine: Inline # Allow short functions on a single line if possible

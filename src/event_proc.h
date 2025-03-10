@@ -1,72 +1,37 @@
 #pragma once
 
 #include "types.h"
-#include <condition_variable>
+
 #include <memory>
 #include <queue>
 #include <vector>
 #include <iostream>
-
-class IEvent {
-   public:
-    virtual ~IEvent() = default;
-    virtual void Process() = 0;
-};
-
-class Event : public IEvent {
-   public:
-    explicit Event(const int value) : value_(value) {}
-    // ~Event() override { std::cout << "Event " << value_ << " destroyed" << std::endl; }
-
-    Event(const Event&) = delete;
-    Event& operator=(const Event&) = delete;
-    Event(Event&&) = delete;
-    Event& operator=(Event&&) = delete;
-
-    virtual void Process() override { std::cout << "Event " << value_ << std::endl; }
-
-   private:
-    int value_;
-};
-
-// using EventPtr = std::unique_ptr<Event>;
-using EventPtr = Event*;
-using Container = std::queue<EventPtr>;
+#include "ring_buffer.h"
 
 class IEventProcessor {
    public:
     using Integer = int64_t;
 
-    void PushEvent(EventPtr event) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        event_queue_.push(event);
-    }
+    std::atomic<size_t> active_writers;
 
-    EventPtr PopEvent() {
-        std::unique_lock<std::mutex> lock(queue_mutex_);
-        queue_cv_.wait(lock, [this]() { return !event_queue_.empty(); });
-        if (event_queue_.empty()) {
-            return nullptr;
-        }
-        EventPtr event = event_queue_.front();
-        event_queue_.pop();
-        return event;
-    }
+    explicit IEventProcessor(const size_t count)
+        : active_writers{count},
+          reserved_events_index_{0},
+          ring_buffer_(std::make_unique<LockFreeRingBuffer<EventPtr>>()) {}
 
-    void ProcessEvents(std::atomic<size_t>& active_writers) {
-        // std::unique_lock<std::mutex> lock(queue_mutex_);
-        // queue_cv_.wait(lock, [this]() { return !event_queue_.empty(); });
-        while (active_writers.load() > 0) {
-            std::unique_ptr<Event> event(PopEvent());
-            if (event) {
+    void ProcessEvents() {
+        while (active_writers.load() > 0 || !ring_buffer_->IsEmpty()) {
+            if (EventPtr event = ring_buffer_->Pop()) {
                 event->Process();
+                delete event;
             }
         }
     }
 
     struct ReservedEvent {
         ReservedEvent() : sequence_number_(0), event_(nullptr) {}
-        explicit ReservedEvent(const Integer sequence_number, void* const event) : sequence_number_(sequence_number), event_(event) {}
+        explicit ReservedEvent(const Integer sequence_number, void* const event)
+            : sequence_number_(sequence_number), event_(event) {}
 
         ReservedEvent(const ReservedEvent&) = delete;
         ReservedEvent& operator=(const ReservedEvent&) = delete;
@@ -85,11 +50,14 @@ class IEventProcessor {
     };
 
     struct ReservedEvents {
-        ReservedEvents(const Integer sequence_number, Event** const event, const size_t count, const size_t event_size = sizeof(IEvent))
+        ReservedEvents(const Integer sequence_number, Event** const event, const size_t count,
+                       const size_t event_size = sizeof(IEvent))
             : sequence_number_(sequence_number), events_(event), count_(count), event_size_(event_size) {}
 
         ~ReservedEvents() {
+#ifdef DEBUG
             std::cout << "ReservedEvents destroyed" << std::endl;
+#endif
             delete[] events_;
         }
 
@@ -102,12 +70,27 @@ class IEventProcessor {
         template <class TEvent, class... Args>
         void Emplace(const size_t index, Args&&... args) {
             // Use placement new to construct the Event
+            if (index >= count_) {
+#ifdef DEBUG
+                std::cerr << "Emplace index overflow: " << index << " >= " << count_ << std::endl;
+#endif
+                return;
+            }
             new (events_[index]) TEvent(std::forward<Args>(args)...);
+#ifdef DEBUG
+            std::cout << "Emplaced event at index " << index << std::endl;
+#endif
         }
 
         Integer GetSequenceNumber() const { return sequence_number_; }
 
         Event* GetEvent(const size_t index) const {
+            if (index >= count_) {
+#ifdef DEBUG
+                std::cout << " GetEvent index overflow " << " " << index << std::endl;
+#endif
+                return nullptr;
+            }
             auto* ptr = static_cast<Event*>(events_[index]);
             return ptr;
         }
@@ -125,11 +108,11 @@ class IEventProcessor {
     // try to reserve T*
     template <typename T>
     std::pair<size_t, void* const> ReserveEvent() {
-        if (size_t count = Count(); count < max_capacity_) {
-            ++count_;
+        if (size_t count = Count(); count > 0) {
+            reserved_events_index_.fetch_add(1);
             // Allocate raw memory without constructing
             auto* ptr = operator new(sizeof(T));
-            return std::make_pair(count_, ptr);
+            return std::make_pair(reserved_events_index_, ptr);
         }
         return std::make_pair(0, nullptr);
     }
@@ -146,66 +129,65 @@ class IEventProcessor {
     }
 
     std::optional<size_t> ReserveRange(const size_t size) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        if (count_ + size <= max_capacity_) {
-            Integer sequence_number = count_ + 1;
-
-            // Allocate array of pointers
-            auto** ptr = new Event*[size];
-            // Allocate memory for each Event
-            for (size_t i = 0; i < size; ++i) {
-                ptr[i] = static_cast<Event*>(operator new(sizeof(Event)));
-            }
-
-            count_ += size;
-            auto index = reserved_events_index_.fetch_add(1) % reserved_events_.size();
-            reserved_events_[index] = std::make_unique<ReservedEvents>(sequence_number, ptr, size, sizeof(Event));
-            return index;
+        // Check ring buffer space first
+        auto res = ring_buffer_->TryReserveSpace(size);
+        if (!res.has_value() || res.value().first == 0) {
+#ifdef DEBUG
+            std::cerr << "Ring buffer space reservation failed" << std::endl;
+#endif
+            return std::nullopt;
         }
-        return std::nullopt;
+        auto [reserved_size, start_index] = res.value();
+
+        // Allocate array of pointers
+        auto** ptr = new Event*[reserved_size];
+        // Allocate memory for each Event
+        for (size_t i = 0; i < reserved_size; ++i) {
+            ptr[i] = static_cast<Event*>(operator new(sizeof(Event)));
+        }
+
+        auto index = reserved_events_index_.fetch_add(1) % reserved_events_.size();
+
+        // Use incrSize for both allocation and ReservedEvents construction
+        reserved_events_[index] = std::make_unique<ReservedEvents>(start_index, ptr, reserved_size, sizeof(Event));
+        return index;
     }
 
-    // void Commit(const Integer sequence_number) {
-    //     EventPtr event(static_cast<Event*>(GetEvent(sequence_number)));
-    //     if (event) {
-    //         PushEvent(std::move(reserved_events_[index]->GetEvent(sequence_number)));
-    //         queue_cv_.notify_one();
-    //         std::cout << "Commit " << sequence_number << std::endl;
-    //     }
-    // }
-
     void Commit(const size_t index, const Integer sequence_number, const size_t count) {
+        if (index >= reserved_events_.size()) {
+#ifdef DEBUG
+            std::cerr << "Commit index overflow: " << index << " >= " << reserved_events_.size() << std::endl;
+#endif
+            return;
+        }
         auto& eventsRef = reserved_events_[index];
-        if (!eventsRef) return;
+        if (!eventsRef || count > eventsRef->Count()) return;  // Add size check
 
         for (size_t i = 0; i < count; ++i) {
-            // Create a new Event and transfer ownership of the memory
             auto* eventPtr = eventsRef->GetEvent(i);
             if (eventPtr) {
-                // Take ownership of the event without deleting it
-                // auto* event = static_cast<Event*>(eventPtr);
-                PushEvent(eventPtr);
+                ring_buffer_->Push(eventPtr);
                 eventPtr = nullptr;
-
-                // Set the pointer to nullptr to avoid double deletion
             }
         }
         eventsRef.reset(nullptr);
 
-        queue_cv_.notify_one();
+#ifdef DEBUG
         std::cout << "Commit " << sequence_number << " " << count << std::endl;
+#endif
     }
 
-    ReservedEvents* GetReservedEvents(const size_t index) { return reserved_events_[index].get(); }
+    ReservedEvents* GetReservedEvents(const size_t index) {
+        if (index >= reserved_events_.size()) {
+            return nullptr;
+        }
+        return reserved_events_[index].get();
+    }
 
    private:
-    size_t Count() const { return event_queue_.size(); }
+    size_t Count() const { return ring_buffer_->FreeSpace(); }
 
-    Container event_queue_;
-    size_t count_{0};
-    const size_t max_capacity_{10};
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
-    std::array<std::unique_ptr<ReservedEvents>, 10> reserved_events_;
-    std::atomic<std::size_t> reserved_events_index_{0};
+    std::array<std::unique_ptr<ReservedEvents>, 32> reserved_events_;
+    std::atomic<std::size_t> reserved_events_index_;
+    std::unique_ptr<LockFreeRingBuffer<EventPtr>> ring_buffer_;
 };
